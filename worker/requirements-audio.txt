@@ -1,0 +1,9 @@
+# Audio stage (Kokoro Mandarin TTS) — heavy deps (pulls in torch).
+# System package also required: espeak-ng (apt-get install espeak-ng).
+# In CI install the CPU-only torch wheel first so runs don't fetch the CUDA build.
+# Used by the ingest-audio workflow and `npm run ingest:audio`.
+kokoro>=0.9.4
+misaki[zh]>=0.9.4
+soundfile>=0.12.1
+numpy>=1.26
+huggingface_hub>=0.25

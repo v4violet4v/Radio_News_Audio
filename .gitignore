@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+
+# env files (NEVER commit secrets — only .env.example is tracked)
+.env
+.env*.local
+.env.development
+.env.production
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# build / tooling
+*.tsbuildinfo
+
+# audio scratch
+tmp_audio/
+
+# OS
+.DS_Store
+Thumbs.db

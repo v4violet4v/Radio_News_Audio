@@ -1,0 +1,75 @@
+name: Ingest — audio
+
+# Heavy stage: read pending_audio segments from the shared Neon DB, synthesize
+# them with Kokoro, upload the mp3 to R2, and mark them ready. Runs here (public
+# repo) for unlimited free GitHub Actions minutes.
+#
+# Triggers are intentionally limited to `schedule` + `workflow_dispatch` (NO
+# pull_request) so a fork's PR can never run this with the repo's secrets.
+on:
+  schedule:
+    # Every 3 hours (UTC), offset 30 min after the private repo's text stage.
+    - cron: "30 */3 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ingest-audio
+  cancel-in-progress: false
+
+jobs:
+  audio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm install
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: worker/requirements-audio.txt
+
+      - name: Install espeak-ng (Kokoro Chinese G2P)
+        run: sudo apt-get update && sudo apt-get install -y espeak-ng
+
+      - name: Cache Kokoro / Hugging Face model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-kokoro-${{ hashFiles('worker/requirements-audio.txt') }}
+          restore-keys: |
+            hf-kokoro-
+
+      - name: Install Python dependencies (CPU torch + Kokoro)
+        run: |
+          python -m pip install --upgrade pip
+          # CPU-only torch wheel — avoids downloading the multi-GB CUDA build.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r worker/requirements-audio.txt
+
+      - name: Run audio generation
+        run: npm run ingest:audio
+        env:
+          # Scoped audio_worker role (SELECT/UPDATE segments + SELECT categories).
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TTS_PROVIDER: kokoro
+          PYTHON_BIN: python
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          # Bucket-scoped R2 token (Object Read & Write on the audio bucket only).
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ vars.R2_BUCKET || 'news-radio-audio' }}
+          R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
+          MAX_AUDIO_PER_RUN: ${{ vars.MAX_AUDIO_PER_RUN || '20' }}
+          # Pause between sentences in seconds (tune cadence; default 0.28).
+          TTS_SENTENCE_GAP_SEC: ${{ vars.TTS_SENTENCE_GAP_SEC || '0.28' }}
