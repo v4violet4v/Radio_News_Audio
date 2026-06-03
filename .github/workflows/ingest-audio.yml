@@ -68,8 +68,8 @@ jobs:
           # Bucket-scoped R2 token (Object Read & Write on the audio bucket only).
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET: ${{ vars.R2_BUCKET || 'news-radio-audio' }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
           R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
-          MAX_AUDIO_PER_RUN: ${{ vars.MAX_AUDIO_PER_RUN || '20' }}
+          MAX_AUDIO_PER_RUN: ${{ secrets.MAX_AUDIO_PER_RUN }}
           # Pause between sentences in seconds (tune cadence; default 0.28).
-          TTS_SENTENCE_GAP_SEC: ${{ vars.TTS_SENTENCE_GAP_SEC || '0.28' }}
+          TTS_SENTENCE_GAP_SEC: ${{ secrets.TTS_SENTENCE_GAP_SEC }}
