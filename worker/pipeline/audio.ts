@@ -8,7 +8,7 @@ import { and, asc, eq, isNull } from "drizzle-orm";
 import { config } from "@/lib/config";
 import { db } from "@/lib/db";
 import { categories, segments } from "@/lib/db/schema";
-import { getTtsProvider } from "@/lib/providers/tts";
+import { getProviderForVoice } from "@/lib/providers/tts";
 import { uploadAudio, bucketName } from "@/lib/r2";
 import { getAvailableVoices, requireDb, requireR2, type AudioSummary } from "./shared";
 
@@ -55,7 +55,10 @@ export async function runAudioStage(): Promise<AudioSummary> {
   const availableVoices = await getAvailableVoices();
 
   for (const seg of pending) {
-    if (availableVoices && !availableVoices.has(seg.voiceId)) {
+    // Edge-tts voices (Microsoft Neural) are cloud-based and always available.
+    // Only validate Kokoro voices against the locally installed set.
+    const isEdge = /^[a-z]{2}-[A-Z]{2}-\w+Neural$/.test(seg.voiceId);
+    if (!isEdge && availableVoices && !availableVoices.has(seg.voiceId)) {
       console.warn(
         `  ⚠️  voice "${seg.voiceId}" not installed — marking failed: ${seg.headline.slice(0, 30)}`,
       );
@@ -66,7 +69,7 @@ export async function runAudioStage(): Promise<AudioSummary> {
 
     try {
       const { mp3Buffer, durationSeconds, transcript } =
-        await getTtsProvider().synthesize({
+        await getProviderForVoice(seg.voiceId).synthesize({
           text: seg.scriptText,
           voiceId: seg.voiceId,
           speed: speedByCat.get(seg.categoryId) ?? 1.0,
