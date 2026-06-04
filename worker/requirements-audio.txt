@@ -7,3 +7,6 @@ misaki[zh]>=0.9.4
 soundfile>=0.12.1
 numpy>=1.26
 huggingface_hub>=0.25
+# edge-tts: Microsoft Neural TTS for Chinese-English mixed content (no system packages).
+edge-tts>=7.0
+mutagen>=1.47
