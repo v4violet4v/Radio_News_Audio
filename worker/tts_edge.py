@@ -23,7 +23,10 @@ import re
 import sys
 import traceback
 
-# Sentence gap between audio clips (same config as Kokoro for consistency).
+# ── Audio constants — match tts_kokoro.py exactly ────────────────────────────
+SAMPLE_RATE = 24000
+SILENCE_THRESHOLD = 0.01   # abs amplitude below which samples are "silent"
+EDGE_MARGIN_SEC = 0.04     # keep a little padding so consonants aren't clipped
 GAP_SEC = float(os.environ.get("TTS_SENTENCE_GAP_SEC", "0.28"))
 
 # ── English-bracket stripping ─────────────────────────────────────────────────
@@ -41,42 +44,23 @@ def _strip_english_brackets(text: str) -> str:
 # ── Sentence splitting ────────────────────────────────────────────────────────
 
 def _split_sentences(text: str) -> list[str]:
-    """Split on Chinese/standard sentence-enders, sub-split long clauses.
+    """Split on Chinese/standard sentence-enders — IDENTICAL to tts_kokoro.py.
 
-    Mirrors tts_kokoro.py's _split_sentences() logic with an extra step from
-    ListenBook: long sentences (>80 chars) are sub-split on commas/colons to
-    keep utterances natural for edge-tts prosody.
+    Splits ONLY on 。！？!? — never sub-splits at commas/colons. Sub-splitting
+    would synthesise each clause separately and inject a full inter-sentence gap
+    mid-sentence at every comma, making edge-tts audio sound more "stuttered"
+    than Kokoro. Keeping this identical to Kokoro gives matching cadence and
+    matching read-along highlight behaviour.
     """
     parts = re.split(r"([。！？!?]+[\s]*)", text)
     sentences: list[str] = []
     for i in range(0, len(parts) - 1, 2):
         sent = (parts[i] + parts[i + 1]).strip()
-        if len(sent) >= 3:
+        if len(sent) >= 3:          # skip fragments shorter than 3 chars
             sentences.append(sent)
     if len(parts) % 2 == 1 and parts[-1].strip():
         sentences.append(parts[-1].strip())
-
-    base = sentences or [text]
-
-    # Sub-split long sentences at commas/colons (ListenBook pattern).
-    result: list[str] = []
-    for sent in base:
-        if len(sent) <= 80:
-            result.append(sent)
-            continue
-        sub_parts = re.split(r"(?<=[，,：:])", sent)
-        current = ""
-        for part in sub_parts:
-            candidate = f"{current}{part}".strip()
-            if current and len(candidate) > 80:
-                result.append(current.strip())
-                current = part
-            else:
-                current = candidate
-        if current.strip():
-            result.append(current.strip())
-
-    return [s for s in result if s]
+    return sentences or [text]
 
 
 # ── Duration measurement ──────────────────────────────────────────────────────
@@ -88,6 +72,37 @@ def _measure_mp3_duration(audio_bytes: bytes) -> float | None:
         return float(MP3(io.BytesIO(audio_bytes)).info.length)
     except Exception:
         return None
+
+
+def _decode_mp3_to_numpy(mp3_bytes: bytes):
+    """Decode MP3 bytes to (float32 mono numpy array, sample_rate).
+
+    Uses soundfile (already a Kokoro dependency) which supports MP3 via
+    libsndfile >= 1.1. Returns the ACTUAL decoded sample rate so downstream
+    timing/encoding stays correct even if edge-tts changes its output format.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    data, sr = sf.read(io.BytesIO(mp3_bytes), dtype="float32")
+    if data.ndim > 1:          # stereo → mono
+        data = data.mean(axis=1)
+    return data.astype("float32"), int(sr)
+
+
+def _trim_silence(arr, sample_rate: int):
+    """Trim leading/trailing near-silence — identical method to tts_kokoro.py."""
+    import numpy as np
+
+    if arr.size == 0:
+        return arr
+    loud = np.flatnonzero(np.abs(arr) > SILENCE_THRESHOLD)
+    if loud.size == 0:
+        return arr[:0]
+    margin = int(EDGE_MARGIN_SEC * sample_rate)
+    start = max(0, int(loud[0]) - margin)
+    end = min(arr.size, int(loud[-1]) + 1 + margin)
+    return arr[start:end]
 
 
 def _speed_to_rate(speed: float) -> str:
@@ -183,47 +198,74 @@ async def synthesize() -> None:
         file=sys.stderr,
     )
 
-    all_audio: list[bytes] = []
+    import numpy as np
+    import soundfile as sf
+
+    # Same assembly approach as tts_kokoro.py: collect trimmed numpy PCM arrays
+    # with uniform gap between sentences, then encode the whole thing as one MP3.
+    # This gives identical silence behaviour to Kokoro. The sample rate is taken
+    # from the actual decoded audio (set on the first decoded sentence).
+    sample_rate = 0
+    gap = None
+    parts: list = []
     lines: list[dict] = []
-    cursor = 0.0
+    cursor_samples = 0
 
     for s_idx, sentence in enumerate(original_sentences):
-        # Strip only English-containing brackets before sending to edge-tts.
-        # Standalone English words (SpaceX, NASA…) are kept and spoken naturally.
         tts_text = _strip_english_brackets(sentence)
         if not tts_text.strip():
             continue
 
         try:
-            mp3_bytes, duration = await _synthesize_sentence(tts_text, voice, rate)
+            mp3_bytes, _ = await _synthesize_sentence(tts_text, voice, rate)
         except Exception as e:
             print(f"[edge-tts] sentence {s_idx} failed: {e}", file=sys.stderr)
             continue
 
+        try:
+            pcm, sr = _decode_mp3_to_numpy(mp3_bytes)
+        except Exception as e:
+            print(f"[edge-tts] MP3 decode failed for sentence {s_idx}: {e}", file=sys.stderr)
+            continue
+
+        # Lock the sample rate + gap to the first decoded sentence's real rate.
+        if sample_rate == 0:
+            sample_rate = sr
+            gap = np.zeros(int(GAP_SEC * sample_rate), dtype="float32")
+
+        # Trim edge silence so the inter-sentence gap is uniform (same as Kokoro).
+        sentence_audio = _trim_silence(pcm, sample_rate)
+        if sentence_audio.size == 0:
+            continue
+
+        if parts:
+            parts.append(gap)
+            cursor_samples += gap.size
+
+        start = cursor_samples / float(sample_rate)
+        parts.append(sentence_audio)
+        cursor_samples += sentence_audio.size
+        end = cursor_samples / float(sample_rate)
+
         # Transcript uses the ORIGINAL sentence (with brackets) for read-along display.
-        lines.append({
-            "start": round(cursor, 3),
-            "end": round(cursor + duration, 3),
-            "text": sentence,
-        })
-        all_audio.append(mp3_bytes)
-        cursor += duration
+        lines.append({"start": round(start, 3), "end": round(end, 3), "text": sentence})
 
-        if s_idx < len(original_sentences) - 1:
-            cursor += GAP_SEC  # inter-sentence gap (not added after the last sentence)
-
-    if not all_audio:
+    if not parts:
         print(json.dumps({"ok": False, "error": "no audio produced"}))
         return
 
-    # Write concatenated MP3 (raw concat of MP3 frames works for streaming playback).
-    with open(out_path, "wb") as f:
-        f.write(b"".join(all_audio))
+    full = np.concatenate(parts).astype("float32")
 
-    total_duration = cursor
+    try:
+        sf.write(out_path, full, sample_rate, format="MP3")
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": f"MP3 encoding failed: {e}"}))
+        return
+
+    duration = len(full) / float(sample_rate)
     print(
         json.dumps(
-            {"ok": True, "duration_seconds": total_duration, "lines": lines},
+            {"ok": True, "duration_seconds": duration, "lines": lines},
             ensure_ascii=False,
         )
     )
