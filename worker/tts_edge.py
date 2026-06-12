@@ -34,7 +34,9 @@ GAP_SEC = float(os.environ.get("TTS_SENTENCE_GAP_SEC", "0.28"))
 # The caller (tts provider) uses the ORIGINAL sentence for transcript display.
 # Example: "埃隆·马斯克 (Elon Musk) 旗下的 SpaceX" → "埃隆·马斯克  旗下的 SpaceX"
 #          Edge-tts then speaks "SpaceX" in English naturally.
-_ENGLISH_BRACKET_RE = re.compile(r"[（(][^）)]*[A-Za-z]{2,}[^）)]*[）)]")
+# Match a bracket whose content contains ANY English letters (incl. a single
+# letter like "(X)"). The letter run is 1+ so single-letter glosses are stripped too.
+_ENGLISH_BRACKET_RE = re.compile(r"[（(][^）)]*[A-Za-z]+[^）)]*[）)]")
 
 
 def _strip_english_brackets(text: str) -> str:
