@@ -37,10 +37,49 @@ GAP_SEC = float(os.environ.get("TTS_SENTENCE_GAP_SEC", "0.28"))
 # Match a bracket whose content contains ANY English letters (incl. a single
 # letter like "(X)"). The letter run is 1+ so single-letter glosses are stripped too.
 _ENGLISH_BRACKET_RE = re.compile(r"[（(][^）)]*[A-Za-z]+[^）)]*[）)]")
+_SOURCE_PREFIX_RE = re.compile(
+    r"^\s*(?:据\s*)?(.{2,100}?)(?:报道|消息)\s*[：:,，]\s*",
+    re.IGNORECASE,
+)
+_SPOKEN_SOURCE_RE = re.compile(
+    r"\b(?:CNBC|BBC|CNN|NPR|AP|AFP|Reuters|RFA|CNA|ABC|CBS|NBC|WSJ|NYT|Politico|Axios|moomoo)\b",
+    re.IGNORECASE,
+)
+_UNKNOWN_SOURCE_SCRIPT_RE = re.compile(r"[A-Za-z\u0400-\u04FF]|\.[A-Za-z]{2,}\b")
+_AI_PREFIX_RE = re.compile(r"^\s*(AI(?:综合报道|新闻摘要|綜合報道|新聞摘要)[：:,，]\s*)")
 
 
 def _strip_english_brackets(text: str) -> str:
     return _ENGLISH_BRACKET_RE.sub("", text)
+
+
+def _split_unspoken_source_prefix(text: str) -> tuple[str | None, str]:
+    """Separate unknown non-major source attribution from spoken text.
+
+    The original sentence remains in the returned transcript lines. Major
+    source labels such as CNBC/BBC/CNA/moomoo are kept; smaller unknown labels
+    like "streamlinefeed.co.ke消息：" or "据Межа. Новини України.报道：" are
+    skipped for speech.
+    """
+    ai = _AI_PREFIX_RE.match(text)
+    prefix = ai.group(1) if ai else ""
+    rest = text[ai.end():] if ai else text
+    match = _SOURCE_PREFIX_RE.match(rest)
+    if not match:
+        return None, text
+    label = match.group(1).strip()
+    if _SPOKEN_SOURCE_RE.search(label):
+        return None, text
+    if not _UNKNOWN_SOURCE_SCRIPT_RE.search(label):
+        return None, text
+
+    unspoken = rest[: match.end()].strip()
+    spoken = (prefix + rest[match.end():]).lstrip()
+    return unspoken, spoken
+
+
+def _strip_unspoken_source_prefix(text: str) -> str:
+    return _split_unspoken_source_prefix(text)[1]
 
 
 # ── Sentence splitting ────────────────────────────────────────────────────────
@@ -214,7 +253,8 @@ async def synthesize() -> None:
     cursor_samples = 0
 
     for s_idx, sentence in enumerate(original_sentences):
-        tts_text = _strip_english_brackets(sentence)
+        unspoken_prefix, transcript_sentence = _split_unspoken_source_prefix(sentence)
+        tts_text = _strip_english_brackets(transcript_sentence)
         if not tts_text.strip():
             continue
 
@@ -249,8 +289,19 @@ async def synthesize() -> None:
         cursor_samples += sentence_audio.size
         end = cursor_samples / float(sample_rate)
 
-        # Transcript uses the ORIGINAL sentence (with brackets) for read-along display.
-        lines.append({"start": round(start, 3), "end": round(end, 3), "text": sentence})
+        # Unknown source attributions stay visible but unspoken; the timed
+        # highlighted line starts with the text the listener actually hears.
+        if unspoken_prefix:
+            lines.append({
+                "start": round(start, 3),
+                "end": round(start, 3),
+                "text": unspoken_prefix,
+            })
+        lines.append({
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": transcript_sentence,
+        })
 
     if not parts:
         print(json.dumps({"ok": False, "error": "no audio produced"}))
