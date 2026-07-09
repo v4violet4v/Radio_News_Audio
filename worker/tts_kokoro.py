@@ -8,7 +8,7 @@ Modes:
   --list-voices   Print {"voices": [...]} — the Chinese (zf_/zm_) voice ids the
                   installed Kokoro build can serve (no model download needed).
 
-Python deps (see worker/requirements-audio.txt):
+Python deps (see worker/requirements.txt):
   kokoro, misaki[zh], soundfile, numpy, huggingface_hub
 System package:
   espeak-ng   (required by the Chinese G2P pipeline)
@@ -114,34 +114,90 @@ def _num_to_zh(match: re.Match) -> str:
     return f"百分之{zh_num}" if is_pct else zh_num
 
 
+# Match a bracket whose content contains ANY English letters (incl. a single
+# letter like "(X)"). The letter run is 1+ so single-letter glosses are stripped too.
+_ENGLISH_BRACKET_RE = re.compile(r"[（(][^）)]*[A-Za-z]+[^）)]*[）)]")
+_SOURCE_PREFIX_RE = re.compile(
+    r"^\s*(?:据\s*)?(.{2,100}?)(?:报道|消息)\s*[：:,，]\s*",
+    re.IGNORECASE,
+)
+_SPOKEN_SOURCE_RE = re.compile(
+    r"\b(?:CNBC|BBC|CNN|NPR|AP|AFP|Reuters|RFA|CNA|ABC|CBS|NBC|WSJ|NYT|Politico|Axios|moomoo)\b",
+    re.IGNORECASE,
+)
+_UNKNOWN_SOURCE_SCRIPT_RE = re.compile(r"[A-Za-z\u0400-\u04FF]|\.[A-Za-z]{2,}\b")
+_AI_PREFIX_RE = re.compile(r"^\s*(AI(?:综合报道|新闻摘要|綜合報道|新聞摘要)[：:,，]\s*)")
+
+
+def _strip_english_brackets(text: str) -> str:
+    """Remove parenthetical content whose body is primarily English.
+
+    Google Translate often outputs "中文名 (English Name)" — the parenthetical
+    English gloss should not be spoken but should stay in the read-along
+    transcript text. Call this before _clean_for_tts() and use the cleaned
+    text for TTS synthesis while keeping the original text for the transcript.
+
+    Examples:
+        "埃隆·马斯克 (Elon Musk) 旗下的" → "埃隆·马斯克  旗下的"
+        "纳斯达克 (Nasdaq) 指数"          → "纳斯达克  指数"
+    """
+    return _ENGLISH_BRACKET_RE.sub("", text)
+
+
+def _strip_unspoken_source_prefix(text: str) -> str:
+    """Drop unknown non-major source attribution from audio only.
+
+    The original sentence remains in the returned transcript lines. Major
+    source labels such as CNBC/BBC/CNA/moomoo are kept; smaller unknown labels
+    like "streamlinefeed.co.ke消息：" or "据Межа. Новини України.报道：" are
+    skipped for speech.
+    """
+    ai = _AI_PREFIX_RE.match(text)
+    prefix = ai.group(1) if ai else ""
+    rest = text[ai.end():] if ai else text
+    match = _SOURCE_PREFIX_RE.match(rest)
+    if not match:
+        return text
+    label = match.group(1).strip()
+    if _SPOKEN_SOURCE_RE.search(label):
+        return text
+    if not _UNKNOWN_SOURCE_SCRIPT_RE.search(label):
+        return text
+    return (prefix + rest[match.end():]).lstrip()
+
+
 def _clean_for_tts(text: str) -> str:
     """Prepare text for Kokoro Chinese TTS.
 
-    1. Convert numbers / percentages to Chinese words (decimals like 5.9%
+    1. Strip parenthetical English glosses (e.g. "埃隆·马斯克 (Elon Musk)").
+    2. Convert numbers / percentages to Chinese words (decimals like 5.9%
        produce audio=None in espeak-ng's Mandarin pipeline).
-    2. Remove punctuation that confuses espeak-ng Chinese G2P:
+    3. Remove punctuation that confuses espeak-ng Chinese G2P:
        - 「」 Traditional Chinese brackets → remove (espeak-ng skips them)
        - Hyphen between Chinese characters (e.g. 谷歌新闻-财经) → remove
-    3. Replace known English terms with Chinese equivalents.
-    4. Strip any remaining ASCII letters.
+    4. Replace known English terms with Chinese equivalents.
+    5. Strip any remaining ASCII letters.
     """
-    # Step 1: numeric conversions (order matters: longest pattern first).
+    # Step 1: strip unknown source labels and English-containing brackets.
+    text = _strip_english_brackets(_strip_unspoken_source_prefix(text))
+
+    # Step 2: numeric conversions (order matters: longest pattern first).
     text = re.sub(r"\d+\.\d+%", _num_to_zh, text)   # 5.9%  → 百分之五点九
     text = re.sub(r"\d+%", _num_to_zh, text)          # 17%   → 百分之十七
     text = re.sub(r"\d+\.\d+", _num_to_zh, text)      # 5.9   → 五点九
 
-    # Step 2: problematic punctuation.
+    # Step 3: problematic punctuation.
     text = text.replace("「", "").replace("」", "")   # Traditional Chinese brackets
     text = text.replace("『", "").replace("』", "")   # Alternative brackets
     # Remove hyphens between Chinese characters (source name artifact, e.g. 谷歌新闻-财经).
     text = re.sub(r"([一-鿿])-+([一-鿿])", r"\1\2", text)
 
-    # Step 3: replace known English terms.
+    # Step 4: replace known English terms.
     for en, zh in sorted(_EN_TO_ZH.items(), key=lambda x: -len(x[0])):
         pattern = rf"(?<![A-Za-z]){re.escape(en)}(?![A-Za-z])"
         text = re.sub(pattern, zh, text, flags=re.IGNORECASE)
 
-    # Step 4: strip remaining ASCII letters.
+    # Step 5: strip remaining ASCII letters.
     text = re.sub(r"[A-Za-z]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -222,14 +278,16 @@ def synthesize():
         print(json.dumps({"ok": False, "error": "missing text/voice/out_path"}))
         return
 
-    text = _clean_for_tts(text)
-    if not text:
+    # Split the ORIGINAL text into sentences first, then clean each sentence for
+    # TTS synthesis. This preserves the original text (incl. English glosses in
+    # brackets) for the read-along transcript while Kokoro only hears cleaned text.
+    original_sentences = _split_sentences(text)
+    if not original_sentences:
         print(json.dumps({"ok": False, "error": "text was empty after cleaning"}))
         return
 
-    sentences = _split_sentences(text)
     print(
-        f"[tts] {len(text)} chars split into {len(sentences)} sentences",
+        f"[tts] {len(text)} chars split into {len(original_sentences)} sentences",
         file=sys.stderr,
     )
 
@@ -240,11 +298,15 @@ def synthesize():
     parts = []          # assembled audio pieces (sentence audio + gaps)
     lines = []          # per-sentence read-along timing: {start, end, text}
     cursor_samples = 0  # running sample offset across the assembled audio
-    for s_idx, sentence in enumerate(sentences):
+    for s_idx, sentence in enumerate(original_sentences):
+        # Clean for TTS (strips English brackets + normalises numbers/English).
+        tts_sentence = _clean_for_tts(sentence)
+        if not tts_sentence:
+            continue
         print(f"[tts] sentence {s_idx}: {sentence[:60]}{'...' if len(sentence)>60 else ''}", file=sys.stderr)
         sentence_chunks = []
         try:
-            for _g, _p, audio in pipeline(sentence, voice=voice, speed=speed):
+            for _g, _p, audio in pipeline(tts_sentence, voice=voice, speed=speed):
                 if audio is not None:
                     sentence_chunks.append(_to_numpy(audio))
         except Exception as e:

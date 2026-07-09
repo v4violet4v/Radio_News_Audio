@@ -37,10 +37,42 @@ GAP_SEC = float(os.environ.get("TTS_SENTENCE_GAP_SEC", "0.28"))
 # Match a bracket whose content contains ANY English letters (incl. a single
 # letter like "(X)"). The letter run is 1+ so single-letter glosses are stripped too.
 _ENGLISH_BRACKET_RE = re.compile(r"[（(][^）)]*[A-Za-z]+[^）)]*[）)]")
+_SOURCE_PREFIX_RE = re.compile(
+    r"^\s*(?:据\s*)?(.{2,100}?)(?:报道|消息)\s*[：:,，]\s*",
+    re.IGNORECASE,
+)
+_SPOKEN_SOURCE_RE = re.compile(
+    r"\b(?:CNBC|BBC|CNN|NPR|AP|AFP|Reuters|RFA|CNA|ABC|CBS|NBC|WSJ|NYT|Politico|Axios|moomoo)\b",
+    re.IGNORECASE,
+)
+_UNKNOWN_SOURCE_SCRIPT_RE = re.compile(r"[A-Za-z\u0400-\u04FF]|\.[A-Za-z]{2,}\b")
+_AI_PREFIX_RE = re.compile(r"^\s*(AI(?:综合报道|新闻摘要|綜合報道|新聞摘要)[：:,，]\s*)")
 
 
 def _strip_english_brackets(text: str) -> str:
     return _ENGLISH_BRACKET_RE.sub("", text)
+
+
+def _strip_unspoken_source_prefix(text: str) -> str:
+    """Drop unknown non-major source attribution from audio only.
+
+    The original sentence remains in the returned transcript lines. Major
+    source labels such as CNBC/BBC/CNA/moomoo are kept; smaller unknown labels
+    like "streamlinefeed.co.ke消息：" or "据Межа. Новини України.报道：" are
+    skipped for speech.
+    """
+    ai = _AI_PREFIX_RE.match(text)
+    prefix = ai.group(1) if ai else ""
+    rest = text[ai.end():] if ai else text
+    match = _SOURCE_PREFIX_RE.match(rest)
+    if not match:
+        return text
+    label = match.group(1).strip()
+    if _SPOKEN_SOURCE_RE.search(label):
+        return text
+    if not _UNKNOWN_SOURCE_SCRIPT_RE.search(label):
+        return text
+    return (prefix + rest[match.end():]).lstrip()
 
 
 # ── Sentence splitting ────────────────────────────────────────────────────────
@@ -214,7 +246,7 @@ async def synthesize() -> None:
     cursor_samples = 0
 
     for s_idx, sentence in enumerate(original_sentences):
-        tts_text = _strip_english_brackets(sentence)
+        tts_text = _strip_english_brackets(_strip_unspoken_source_prefix(sentence))
         if not tts_text.strip():
             continue
 
