@@ -144,8 +144,8 @@ def _strip_english_brackets(text: str) -> str:
     return _ENGLISH_BRACKET_RE.sub("", text)
 
 
-def _strip_unspoken_source_prefix(text: str) -> str:
-    """Drop unknown non-major source attribution from audio only.
+def _split_unspoken_source_prefix(text: str) -> tuple[str | None, str]:
+    """Separate unknown non-major source attribution from spoken text.
 
     The original sentence remains in the returned transcript lines. Major
     source labels such as CNBC/BBC/CNA/moomoo are kept; smaller unknown labels
@@ -157,13 +157,20 @@ def _strip_unspoken_source_prefix(text: str) -> str:
     rest = text[ai.end():] if ai else text
     match = _SOURCE_PREFIX_RE.match(rest)
     if not match:
-        return text
+        return None, text
     label = match.group(1).strip()
     if _SPOKEN_SOURCE_RE.search(label):
-        return text
+        return None, text
     if not _UNKNOWN_SOURCE_SCRIPT_RE.search(label):
-        return text
-    return (prefix + rest[match.end():]).lstrip()
+        return None, text
+
+    unspoken = rest[: match.end()].strip()
+    spoken = (prefix + rest[match.end():]).lstrip()
+    return unspoken, spoken
+
+
+def _strip_unspoken_source_prefix(text: str) -> str:
+    return _split_unspoken_source_prefix(text)[1]
 
 
 def _clean_for_tts(text: str) -> str:
@@ -299,11 +306,12 @@ def synthesize():
     lines = []          # per-sentence read-along timing: {start, end, text}
     cursor_samples = 0  # running sample offset across the assembled audio
     for s_idx, sentence in enumerate(original_sentences):
+        unspoken_prefix, transcript_sentence = _split_unspoken_source_prefix(sentence)
         # Clean for TTS (strips English brackets + normalises numbers/English).
-        tts_sentence = _clean_for_tts(sentence)
+        tts_sentence = _clean_for_tts(transcript_sentence)
         if not tts_sentence:
             continue
-        print(f"[tts] sentence {s_idx}: {sentence[:60]}{'...' if len(sentence)>60 else ''}", file=sys.stderr)
+        print(f"[tts] sentence {s_idx}: {transcript_sentence[:60]}{'...' if len(transcript_sentence)>60 else ''}", file=sys.stderr)
         sentence_chunks = []
         try:
             for _g, _p, audio in pipeline(tts_sentence, voice=voice, speed=speed):
@@ -331,7 +339,19 @@ def synthesize():
         parts.append(sentence_audio)
         cursor_samples += sentence_audio.size
         end = cursor_samples / float(SAMPLE_RATE)
-        lines.append({"start": round(start, 3), "end": round(end, 3), "text": sentence})
+        # Unknown source attributions stay visible but unspoken; the timed
+        # highlighted line starts with the text the listener actually hears.
+        if unspoken_prefix:
+            lines.append({
+                "start": round(start, 3),
+                "end": round(start, 3),
+                "text": unspoken_prefix,
+            })
+        lines.append({
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": transcript_sentence,
+        })
 
     if not parts:
         print(json.dumps({"ok": False, "error": "no audio produced"}))

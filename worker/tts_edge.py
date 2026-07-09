@@ -53,8 +53,8 @@ def _strip_english_brackets(text: str) -> str:
     return _ENGLISH_BRACKET_RE.sub("", text)
 
 
-def _strip_unspoken_source_prefix(text: str) -> str:
-    """Drop unknown non-major source attribution from audio only.
+def _split_unspoken_source_prefix(text: str) -> tuple[str | None, str]:
+    """Separate unknown non-major source attribution from spoken text.
 
     The original sentence remains in the returned transcript lines. Major
     source labels such as CNBC/BBC/CNA/moomoo are kept; smaller unknown labels
@@ -66,13 +66,20 @@ def _strip_unspoken_source_prefix(text: str) -> str:
     rest = text[ai.end():] if ai else text
     match = _SOURCE_PREFIX_RE.match(rest)
     if not match:
-        return text
+        return None, text
     label = match.group(1).strip()
     if _SPOKEN_SOURCE_RE.search(label):
-        return text
+        return None, text
     if not _UNKNOWN_SOURCE_SCRIPT_RE.search(label):
-        return text
-    return (prefix + rest[match.end():]).lstrip()
+        return None, text
+
+    unspoken = rest[: match.end()].strip()
+    spoken = (prefix + rest[match.end():]).lstrip()
+    return unspoken, spoken
+
+
+def _strip_unspoken_source_prefix(text: str) -> str:
+    return _split_unspoken_source_prefix(text)[1]
 
 
 # ── Sentence splitting ────────────────────────────────────────────────────────
@@ -246,7 +253,8 @@ async def synthesize() -> None:
     cursor_samples = 0
 
     for s_idx, sentence in enumerate(original_sentences):
-        tts_text = _strip_english_brackets(_strip_unspoken_source_prefix(sentence))
+        unspoken_prefix, transcript_sentence = _split_unspoken_source_prefix(sentence)
+        tts_text = _strip_english_brackets(transcript_sentence)
         if not tts_text.strip():
             continue
 
@@ -281,8 +289,19 @@ async def synthesize() -> None:
         cursor_samples += sentence_audio.size
         end = cursor_samples / float(sample_rate)
 
-        # Transcript uses the ORIGINAL sentence (with brackets) for read-along display.
-        lines.append({"start": round(start, 3), "end": round(end, 3), "text": sentence})
+        # Unknown source attributions stay visible but unspoken; the timed
+        # highlighted line starts with the text the listener actually hears.
+        if unspoken_prefix:
+            lines.append({
+                "start": round(start, 3),
+                "end": round(start, 3),
+                "text": unspoken_prefix,
+            })
+        lines.append({
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": transcript_sentence,
+        })
 
     if not parts:
         print(json.dumps({"ok": False, "error": "no audio produced"}))
