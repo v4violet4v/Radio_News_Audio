@@ -45,7 +45,10 @@ _SPOKEN_SOURCE_RE = re.compile(
     r"\b(?:CNBC|BBC|CNN|NPR|AP|AFP|Reuters|RFA|CNA|ABC|CBS|NBC|WSJ|NYT|Politico|Axios|moomoo)\b",
     re.IGNORECASE,
 )
-_UNKNOWN_SOURCE_SCRIPT_RE = re.compile(r"[A-Za-z\u0400-\u04FF]|\.[A-Za-z]{2,}\b")
+_UNKNOWN_SOURCE_SCRIPT_RE = re.compile(
+    r"[A-Za-z\u0400-\u04FF\u0590-\u05FF\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]"
+    r"|\.[A-Za-z]{2,}\b"
+)
 _AI_PREFIX_RE = re.compile(r"^\s*(AI(?:综合报道|新闻摘要|綜合報道|新聞摘要)[：:,，]\s*)")
 
 
