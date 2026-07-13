@@ -35,8 +35,10 @@ export const categories = pgTable("categories", {
 });
 
 // segments — the shared audio library. Audio stage READS id/scriptText/voiceId/
-// categoryId/headline/status/audioUrl/createdAt and WRITES audioUrl/duration/
-// transcript/status.
+// categoryId/headline/status/audioUrl/contentType/createdAt and WRITES
+// audioUrl/duration/transcript/status.
+export type SegmentContentType = "news" | "commentary";
+
 export const segments = pgTable("segments", {
   id: uuid("id").primaryKey().defaultRandom(),
   categoryId: integer("category_id").notNull(),
@@ -45,6 +47,10 @@ export const segments = pgTable("segments", {
   audioUrl: text("audio_url"),
   durationSeconds: integer("duration_seconds").notNull().default(0),
   voiceId: text("voice_id").notNull(),
+  contentType: text("content_type")
+    .$type<SegmentContentType>()
+    .notNull()
+    .default("news"),
   // Pipeline stage: 'pending_audio' (text done, no audio yet) | 'ready' | 'failed'.
   status: text("status").notNull().default("ready"),
   // Per-sentence read-along timing: [{start,end,text}] (set by this audio stage).

@@ -1,10 +1,12 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { config, requireEnv } from "@/lib/config";
+import type { SegmentContentType } from "@/lib/db/schema";
 
 /**
  * Cloudflare R2 (S3-compatible) upload helper.
  *
- * Audio object keys are deterministic from the segment id (`audio/<id>.mp3`).
+ * Audio object keys are deterministic from the segment id (`audio/<id>.mp3`
+ * for news, `commentary/<id>.mp3` for long-form commentary).
  * Use an R2 API token scoped to just this bucket with Object Read & Write.
  */
 let _client: S3Client | undefined;
@@ -23,8 +25,9 @@ function client(): S3Client {
   return _client;
 }
 
-export function audioKey(segmentId: string): string {
-  return `audio/${segmentId}.mp3`;
+export function audioKey(segmentId: string, contentType: SegmentContentType = "news"): string {
+  const prefix = contentType === "commentary" ? "commentary" : "audio";
+  return `${prefix}/${segmentId}.mp3`;
 }
 
 export function publicUrl(key: string): string {
@@ -40,8 +43,9 @@ export interface UploadResult {
 export async function uploadAudio(
   segmentId: string,
   body: Buffer,
+  contentType: SegmentContentType = "news",
 ): Promise<UploadResult> {
-  const key = audioKey(segmentId);
+  const key = audioKey(segmentId, contentType);
   await client().send(
     new PutObjectCommand({
       Bucket: requireEnv("R2_BUCKET"),

@@ -33,6 +33,7 @@ export async function runAudioStage(): Promise<AudioSummary> {
       voiceId: segments.voiceId,
       categoryId: segments.categoryId,
       headline: segments.headline,
+      contentType: segments.contentType,
     })
     .from(segments)
     .where(and(eq(segments.status, "pending_audio"), isNull(segments.audioUrl)))
@@ -74,7 +75,7 @@ export async function runAudioStage(): Promise<AudioSummary> {
           voiceId: seg.voiceId,
           speed: speedByCat.get(seg.categoryId) ?? 1.0,
         });
-      const upload = await uploadAudio(seg.id, mp3Buffer);
+      const upload = await uploadAudio(seg.id, mp3Buffer, seg.contentType);
       summary.bytesUploaded += upload.bytes;
 
       await db
