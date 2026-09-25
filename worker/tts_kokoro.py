@@ -130,6 +130,12 @@ _UNKNOWN_SOURCE_SCRIPT_RE = re.compile(
     r"|\.[A-Za-z]{2,}\b"
 )
 _AI_PREFIX_RE = re.compile(r"^\s*(AI(?:综合报道|新闻摘要|綜合報道|新聞摘要)[：:,，]\s*)")
+# Kokoro's Mandarin G2P drops ASCII letters, so the generic safety map normally
+# expands AI to 人工智能. Keep the editorial prefix "AI综合报道" as the spoken
+# abbreviation instead: 诶爱 is the Mandarin letter-name approximation of A-I.
+_AI_SUMMARY_SPOKEN_PREFIX_RE = re.compile(
+    r"^(\s*)AI(综合报道|綜合報道)(?=[：:,，])", re.IGNORECASE
+)
 
 
 def _strip_english_brackets(text: str) -> str:
@@ -190,6 +196,7 @@ def _clean_for_tts(text: str) -> str:
     """
     # Step 1: strip unknown source labels and English-containing brackets.
     text = _strip_english_brackets(_strip_unspoken_source_prefix(text))
+    text = _AI_SUMMARY_SPOKEN_PREFIX_RE.sub(r"\1诶爱\2", text)
 
     # Step 2: numeric conversions (order matters: longest pattern first).
     text = re.sub(r"\d+\.\d+%", _num_to_zh, text)   # 5.9%  → 百分之五点九
